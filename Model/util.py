@@ -6,7 +6,7 @@ import tensorflow as tf
 from sklearn.cluster import KMeans
 from sklearn.metrics import mean_squared_error, r2_score, silhouette_score
 
-MODELS = ["mlp", "conv" "ar"]
+MODELS = ["mlp", "conv" ,"ar"]
 
 
 def get_models_list() :
