@@ -9,7 +9,7 @@ from Model import util
 
 HORIZON = 1
 WINDOW_SIZE = 7
-MODELS = ["deepar"]
+MODELS = util.get_models_list()
 scaler = StandardScaler()
 
 RESULTS_FILE = "/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/base/results/results.csv"

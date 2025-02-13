@@ -6,6 +6,11 @@ import tensorflow as tf
 from sklearn.cluster import KMeans
 from sklearn.metrics import mean_squared_error, r2_score, silhouette_score
 
+MODELS = ["mlp", "conv" "ar"]
+
+
+def get_models_list() :
+    return MODELS
 
 def evaluate_preds(y_true, y_pred, scaler):
     # Ensure y_pred is a NumPy array in case it's a list of predictions

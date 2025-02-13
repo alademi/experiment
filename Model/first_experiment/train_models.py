@@ -8,17 +8,12 @@ from Model.util import  perform_clustering
 
 HORIZON = 1
 WINDOW_SIZE = 7
-MODELS = ["autoregressive"]
+MODELS = util.get_models_list()
 scaler = StandardScaler()
 
 
 def train_models(clusters, clusters_no, file_name):
-    """
-    For each cluster:
-      - Train every model defined in MODELS using the training data.
-      - Save each model's best weights using a checkpoint callback.
-      - (Further evaluation and ranking steps can be added here as needed.)
-    """
+
     # Loop over each cluster
     for i in range(clusters_no):
         train_windows = clusters[i]["train_windows"]
@@ -50,9 +45,6 @@ def train_models(clusters, clusters_no, file_name):
             )
             predictions = model.predict(val_windows)
             print(predictions)
-
-
-
 
 
 def cluster_data(train):

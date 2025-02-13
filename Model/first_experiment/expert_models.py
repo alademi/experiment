@@ -11,7 +11,7 @@ from Model.util import perform_clustering, save_result_csv
 
 HORIZON = 1
 WINDOW_SIZE = 7
-MODELS = ["deepar"]
+MODELS = util.get_models_list()
 scaler = StandardScaler()
 
 

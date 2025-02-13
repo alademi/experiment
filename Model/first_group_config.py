@@ -14,9 +14,6 @@ class ModelBuilder:
         self.n_features = n_features
 
     def build_model(self):
-        """
-        Builds the selected model architecture and compiles it.
-        """
         if self.model_type == "conv":
             self.model = self._build_model1()
         elif self.model_type == "conv-lstm":
@@ -27,10 +24,11 @@ class ModelBuilder:
             if self.n_timesteps is None or self.n_features is None:
                 raise ValueError("n_timesteps and n_features must be provided for lstm model.")
             self.model = self._build_model4()
-        elif self.model_type == "ar":  # Autoregressive linear model
+        elif self.model_type == "ar":
             self.model = self._build_ar_model()
         else:
-            raise ValueError("Invalid model type. Choose from 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar', 'trmf', or 'deepar'.")
+            raise ValueError("Invalid model type. Choose from 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar'.")
+        return self.model  # Return the built model
 
     def _build_model1(self):
         model = Sequential(name="conv")
@@ -75,10 +73,7 @@ class ModelBuilder:
         otherwise, it expects a vector of shape (n_timesteps,).
         """
         model = Sequential(name="autoregressive")
-        if self.n_features is None:
-            model.add(Input(shape=(self.n_timesteps,)))
-        else:
-            model.add(Input(shape=(self.n_timesteps, self.n_features)))
-            model.add(Flatten())
+        model.add(Input(shape=(self.n_timesteps, self.n_features)))
+        model.add(Flatten())
         model.add(Dense(1, activation='linear'))
         return model
