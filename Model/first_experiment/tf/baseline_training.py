@@ -23,6 +23,7 @@ def train_models(train_windows, train_labels, test_windows, test_labels, dataset
         # Build and compile the model
         model_builder = ModelBuilder(model_type=model_name, n_timesteps=WINDOW_SIZE, n_features=HORIZON)
         model = model_builder.build_model()
+
         model.compile(optimizer='adam', loss='mae')
 
         # Train the model with checkpointing (saving best weights)
@@ -58,5 +59,5 @@ def prepare_data(data_path):
             train_models(train_windows, train_labels, test_windows, test_labels, dataset_name)
 
 
-test_files_path = "test_data"
+test_files_path = "../test"
 prepare_data(test_files_path)

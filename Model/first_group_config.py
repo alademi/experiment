@@ -5,15 +5,27 @@ from tensorflow.keras.layers import Lambda, Dense, Conv1D, AveragePooling1D, LST
 import tensorflow as tf
 
 
-class ModelBuilder:
 
+class ModelBuilder:
     def __init__(self, model_type="conv", n_timesteps=None, n_features=None):
+        """
+        Parameters:
+            model_type (str): Type of model to build. Options include 'conv', 'conv-lstm',
+                              'mlp', 'lstm', 'ar', and 'decision-tree'.
+            n_timesteps (int): Number of time steps in the input.
+            n_features (int): Number of features per time step.
+        """
         self.model_type = model_type
         self.model = None
         self.n_timesteps = n_timesteps
         self.n_features = n_features
 
     def build_model(self):
+        """
+        Builds the selected model architecture.
+        For neural network models, a Keras model is returned.
+        For Decision Tree, a scikit-learn object is returned.
+        """
         if self.model_type == "conv":
             self.model = self._build_model1()
         elif self.model_type == "conv-lstm":
@@ -22,13 +34,15 @@ class ModelBuilder:
             self.model = self._build_model3()
         elif self.model_type == "lstm":
             if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for lstm model.")
+                raise ValueError("n_timesteps and n_features must be provided for the LSTM model.")
             self.model = self._build_model4()
-        elif self.model_type == "ar":
+        elif self.model_type == "ar":  # Autoregressive linear model
             self.model = self._build_ar_model()
         else:
-            raise ValueError("Invalid model type. Choose from 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar'.")
-        return self.model  # Return the built model
+            raise ValueError(
+                "Invalid model type. Choose from 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar'")
+
+        return self.model  # Make sure to return the model!
 
     def _build_model1(self):
         model = Sequential(name="conv")
@@ -68,12 +82,12 @@ class ModelBuilder:
     def _build_ar_model(self):
         """
         Builds a simple autoregressive linear model.
-        This model expects lagged inputs (i.e. previous time steps) and outputs the next value.
-        If n_features is provided, the input shape is (n_timesteps, n_features) and flattened;
-        otherwise, it expects a vector of shape (n_timesteps,).
+        This model expects lagged inputs (i.e., previous time steps) and outputs the next value.
         """
         model = Sequential(name="autoregressive")
         model.add(Input(shape=(self.n_timesteps, self.n_features)))
         model.add(Flatten())
         model.add(Dense(1, activation='linear'))
         return model
+
+

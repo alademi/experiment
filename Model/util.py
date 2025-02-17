@@ -1,12 +1,14 @@
 import os
 
+import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.cluster import KMeans
 from sklearn.metrics import mean_squared_error, r2_score, silhouette_score
+from tslearn.clustering import KShape
 
-MODELS = ["mlp", "conv" ,"ar"]
+MODELS = ["conv", "conv-lstm", "lstm" ,"mlp", "ar"]
 
 
 def get_models_list() :
@@ -45,18 +47,22 @@ def evaluate_preds(y_true, y_pred, scaler):
     }
 
 
-def compute_clusters_no(subsequences):
-    # If the input is 3D, reshape it to 2D
+def compute_clusters_kshape(subsequences):
+    # Ensure the data is 2D: (n_samples, time_steps)
     if subsequences.ndim > 2:
         n_samples = subsequences.shape[0]
         subsequences = subsequences.reshape(n_samples, -1)
 
+    # Evaluate a range of clusters to determine the optimal number via silhouette score.
+    # Note: silhouette_score here uses Euclidean distance. Although not the exact shape-based distance,
+    # it can serve as a proxy since the subsequences are already z-normalized.
     range_n_clusters = range(2, 11)
     silhouette_scores = []
+
     for n_clusters in range_n_clusters:
-        kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(subsequences)
-        labels = kmeans.labels_
-        score = silhouette_score(subsequences, labels)
+        kshape = KShape(n_clusters=n_clusters, random_state=0)
+        labels = kshape.fit_predict(subsequences)
+        score = silhouette_score(subsequences, labels, metric="euclidean")
         silhouette_scores.append(score)
 
     optimal_n_clusters = range_n_clusters[np.argmax(silhouette_scores)]
@@ -65,15 +71,15 @@ def compute_clusters_no(subsequences):
 
 
 def perform_clustering(subsequences):
-    # If the input is 3D, reshape it to 2D
+    # Ensure the data is 2D: (n_samples, time_steps)
     if subsequences.ndim > 2:
         n_samples = subsequences.shape[0]
         subsequences = subsequences.reshape(n_samples, -1)
 
-    clusters_no = compute_clusters_no(subsequences)
-    kmeans = KMeans(n_clusters=clusters_no, random_state=42)
-    kmeans.fit(subsequences)
-    return kmeans
+    clusters_no = compute_clusters_kshape(subsequences)
+    kshape = KShape(n_clusters=clusters_no, random_state=42)
+    kshape.fit(subsequences)
+    return kshape
 
 def get_labelled_windows(x, horizon=1):
     return x[:, :-horizon], x[:, -horizon:]
@@ -97,8 +103,12 @@ def create_model_checkpoint(save_path):
         save_best_only=True
     )
 
+def save_sklearn_model(model, save_path):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    joblib.dump(model, save_path)
 
-def save_result_csv(dataset_name, result, csv_filename="results/results.csv"):
+
+def save_result_csv(dataset_name, result, csv_filename="results/expert_results.csv"):
     """
     Saves (or appends) the result for a given dataset to a CSV file.
     If result is not a dictionary, it will be stored under the key 'result'.

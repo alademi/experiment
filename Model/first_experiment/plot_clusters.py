@@ -13,65 +13,56 @@ WINDOW_SIZE = 7
 scaler = StandardScaler()
 
 
+def plot_clusters(subsequences, labels, cluster_no, window_size, file_name):
+    epsilon = 1e-8
+    subsequences_norm = (subsequences - np.mean(subsequences, axis=1, keepdims=True)) / (
+                np.std(subsequences, axis=1, keepdims=True) + epsilon)
 
-
-def plot_clusters(validation_windows, labels, cluster_no, window_size, file_name):
-    """
-    Plot each cluster of time series with red, blue, green, and other distinct colors on a white background,
-    and save each plot with the file name.
-
-    Parameters:
-    - validation_windows: 2D numpy array where each row is a flattened time series.
-    - labels: array of cluster labels for each time series.
-    - cluster_no: int, the number of clusters.
-    - window_size: int, the number of time steps (x-axis size).
-    - file_name: str, base name of the file for saving plots.
-    """
-    # Standardize each time series to have mean 0 and standard deviation 1 (z-scores)
-    validation_windows_z = (validation_windows - np.mean(validation_windows, axis=1, keepdims=True)) / np.std(
-        validation_windows, axis=1, keepdims=True)
-
-    # Define a list of distinct colors for the clusters
+    # Define a list of distinct colors for the clusters (will repeat if clusters > len(cluster_colors))
     cluster_colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'pink', 'cyan', 'magenta', 'gray']
 
+    # Dynamically determine subplot layout
+    rows = int(np.ceil(cluster_no / 3))
     plt.figure(figsize=(18, 12))  # Adjust figure size for clarity
 
     for cluster in range(cluster_no):
-        plt.subplot(cluster_no // 3 + 1, 3, cluster + 1)
-        cluster_data = validation_windows_z[labels == cluster]  # Use standardized data
+        plt.subplot(rows, 3, cluster + 1)
+        # Get standardized series for the current cluster
+        cluster_series = subsequences_norm[labels == cluster]
 
-        # Plot each standardized time series in the cluster with distinct colors
-        for series in cluster_data:
-            plt.plot(range(1, window_size + 1), series, color=cluster_colors[cluster % len(cluster_colors)], alpha=0.5)
+        # Plot each standardized time series in the cluster, flattening in case of extra dimensions
+        for series in cluster_series:
+            plt.plot(range(1, window_size + 1), series.flatten(),
+                     color=cluster_colors[cluster % len(cluster_colors)], alpha=0.5)
 
         # Set fixed x-axis limits based on window size
         plt.xlim(1, window_size)
-
         # Set consistent y-axis limits for z-scores
         plt.ylim(-3, 3)  # Common z-score range
 
-        # Add grid lines with light style for contrast on white background
+        # Add grid lines with light style
         plt.grid(True, linestyle='--', alpha=0.5, color='gray')
 
-        # Styling for title and labels
+        # Add titles and labels for clarity
         plt.title(f'Cluster {cluster + 1}', fontsize=16, fontweight='bold', color='black')
         plt.xlabel("Time Index", fontsize=14, color='black')
         plt.ylabel("Value (Z-Score)", fontsize=14, color='black')
 
-    # Save plot as an image file
+    # Save the plot as an image file
     plt.tight_layout()
     save_path = f"cluster_plots/{file_name}_clusters.png"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)  # Create directory if it doesn't exist
     plt.savefig(save_path)
-    plt.close()  # Close the plot to free memory
+    plt.close()  # Free memory
     print(f"Saved plot for {file_name} to {save_path}")
+
 
 
 def cluster_data(train):
     values = train.iloc[:, 1].to_numpy()
     time_stamp = train.iloc[:, 0].to_numpy()
-    train_norm = scaler.transform(train.iloc[:, 1].values.reshape(-1, 1))
-    train_windows, train_labels = util.make_windows(train_norm, WINDOW_SIZE, HORIZON)
+    #train_norm = scaler.transform(train.iloc[:, 1].values.reshape(-1, 1))
+    train_windows, train_labels = util.make_windows(train.iloc[:, 1].values.reshape(-1, 1), WINDOW_SIZE, HORIZON)
     clustering_result = perform_clustering(train_windows)
 
     clusters = {}
@@ -100,6 +91,16 @@ def prepare_data(data_path):
             print("Processing dataset:", dataset_name)
             # Use os.path.join to build the full file path
             data = pd.read_csv(os.path.join(data_path, name))
+
+            values = data.iloc[:, 1].values
+            # If there are more than 20,000 rows, select only the first 20,000 and log the confirmation
+            if len(values) > 20000:
+                data = data.iloc[:20000]
+                print(f"Dataset {dataset_name} has more than 20000 rows. Selected the first 20000 rows for processing.")
+
+            # Log the shape of the data to check the truncation
+            print(f"Data shape for {dataset_name} after processing: {data.shape}")
+
             split = int(0.8 * len(data))
             train, test = data[:split], data[split:]
             # Fit the scaler on the training data
@@ -110,5 +111,5 @@ def prepare_data(data_path):
 
 
 # Specify the path to your directory containing CSV files
-test_files_path = "test_data"  # Adjust the path as needed
+test_files_path = "test"  # Adjust the path as needed
 prepare_data(test_files_path)

@@ -12,7 +12,7 @@ WINDOW_SIZE = 7
 MODELS = util.get_models_list()
 scaler = StandardScaler()
 
-RESULTS_FILE = "/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/base/results/results.csv"
+RESULTS_FILE = "/Model/first_experiment/base/results/base_results.csv"
 
 
 def load_models(dataset):
@@ -88,5 +88,5 @@ def prepare_data(data_path):
             evaluate_models(test_norm, dataset_name)
 
 
-test_files_path = "test_data"  # Adjust as needed
+test_files_path = "../test"  # Adjust as needed
 prepare_data(test_files_path)

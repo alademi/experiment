@@ -22,14 +22,8 @@ def eval_val(model, subsequences, labels):
         prediction = model.predict(current_window)
         predictions.append(prediction)
 
-    # Convert list to numpy array; assumed shape is (n, 1, 1)
     predictions = np.array(predictions)
-
-    # Squeeze out the last dimension so that predictions become (n, 1)
     predictions = np.squeeze(predictions, axis=2)
-
-    # Alternatively, if you prefer, you can use reshape:
-    # predictions = predictions.reshape(predictions.shape[0], predictions.shape[1])
 
     labels = np.array(labels)  # assumed shape is (n, 1)
 
@@ -161,8 +155,8 @@ def prepare_data(data_path):
             result = evaluate_expert_models(expert_models, test, clusters_center)
 
             # Save the summed errors (mae, mse, rmse) along with the dataset name.
-            save_result_csv(dataset_name, result, csv_filename="expert/results/results.csv")
+            save_result_csv(dataset_name, result, csv_filename="../expert/results/expert_results.csv")
 
 
-test_files_path = "test_data"  # Adjust the path as needed
+test_files_path = "../test"  # Adjust the path as needed
 prepare_data(test_files_path)
