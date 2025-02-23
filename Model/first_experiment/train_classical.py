@@ -17,7 +17,7 @@ HORIZON = 1
 WINDOW_SIZE = 7
 
 # List of model types to train
-MODELS = ["arima", "decision-tree", "random-forest", "gradient-boosted-trees"]
+MODELS = ["decision-tree", "random-forest", "gradient-boosted-trees"]
 
 # Instantiate a scaler
 scaler = StandardScaler()
@@ -62,7 +62,7 @@ def train_classical_models(train_windows, train_labels, dataset):
             print(f"Directory {save_dir} already exists.")
 
         # Save the trained model using torch.save in .pth format.
-        model_filename = os.path.join(save_dir, "model.pth")
+        model_filename = os.path.join(save_dir, "best_model.pth")
         torch.save(model, model_filename)
         print(f"Saved model {model_name} to {model_filename}")
 
@@ -83,7 +83,7 @@ def evaluate_classical_models(test_windows, test_labels, dataset):
 
     results = {}
     for model_name in MODELS:
-        model_filename = os.path.join("base/base-models", dataset, model_name, "model.pth")
+        model_filename = os.path.join("/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/base/base-models", dataset, model_name, "best_model.pth")
         print(f"Loading model {model_name} from {model_filename}")
         model = torch.load(model_filename)
 
@@ -141,7 +141,7 @@ def prepare_data(data_path):
             all_results[dataset] = results
 
     # Prepare the directory to save results
-    results_dir = os.path.join("base", "base-models", "results")
+    results_dir = os.path.join("/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/base", "base-models", "results")
     if not os.path.exists(results_dir):
         print(f"Directory {results_dir} does not exist. Creating directory...")
         os.makedirs(results_dir)
@@ -160,5 +160,5 @@ def prepare_data(data_path):
 
 
 if __name__ == '__main__':
-    data_path = "test-models"  # Update this to your CSV folder path.
+    data_path = "test_files"  # Update this to your CSV folder path.
     prepare_data(data_path)

@@ -7,8 +7,8 @@ from sklearn.preprocessing import StandardScaler
 import torch
 
 from Model import util
-from Model.util import perform_clustering, save_result_csv
-from Model.models_config import ModelBuilder  # PyTorch ModelBuilder
+from Model.util import perform_clustering
+from Model.models_config import ModelBuilder
 
 HORIZON = 1
 WINDOW_SIZE = 7
@@ -17,44 +17,49 @@ MODELS = ModelBuilder.get_available_models()
 
 scaler = StandardScaler()
 
-#############################################
-# Evaluate Validation Predictions Point-by-Point
-#############################################
+
 def eval_val(model, model_name, subsequences, labels):
-    """
-    For each validation window (subsequence), adjust its shape as needed and
-    obtain a prediction from the model. Then compute RMSE over all windows.
-    """
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     predictions = []
     for t in range(len(subsequences)):
         current_window = subsequences[t]
         if model_name != "mlp":
-            # For non-MLP models, ensure the window is 2D (WINDOW_SIZE, HORIZON)
             if current_window.ndim == 1:
                 current_window = np.expand_dims(current_window, axis=-1)
         else:
-            # For MLP, if shape is (WINDOW_SIZE, 1) squeeze to (WINDOW_SIZE,)
             if current_window.ndim == 2 and current_window.shape[1] == 1:
                 current_window = np.squeeze(current_window, axis=1)
         # Add batch dimension
         input_tensor = torch.tensor(current_window, dtype=torch.float32, device=device).unsqueeze(0)
-        model.eval()
-        with torch.no_grad():
-            output = model(input_tensor)
-            # Unpack if model returns a tuple (e.g., DeepAR returns (mean, sigma))
-            if isinstance(output, tuple):
-                output = output[0]
-        predictions.append(output.cpu().numpy().squeeze())
+
+        # For torch-based models:
+        if hasattr(model, 'eval'):
+            model.eval()
+            with torch.no_grad():
+                output = model(input_tensor)
+                if isinstance(output, tuple):
+                    output = output[0]
+            pred = output.cpu().numpy().squeeze()
+        else:
+            # For non-torch models:
+            input_array = input_tensor.cpu().numpy().squeeze()
+            if input_array.ndim == 1:
+                input_array = input_array.reshape(1, -1)
+            pred = model.predict(input_array).squeeze()
+
+        # If pred is an array (e.g., [value1, value2, value3]), take the first element.
+        if isinstance(pred, np.ndarray) and pred.ndim != 0:
+            pred = pred[0]
+        predictions.append(pred)
+
     predictions = np.array(predictions)
     labels = np.array(labels).squeeze()
     mse = np.mean((predictions - labels) ** 2)
     rmse = np.sqrt(mse)
     return rmse
 
-#############################################
-# Rank Expert Models Per Cluster
-#############################################
+
 def rank_models(dataset, clusters, clusters_no):
     """
     For each cluster, load all expert models (one per model type), evaluate them on
@@ -63,7 +68,7 @@ def rank_models(dataset, clusters, clusters_no):
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     models_ranking = {"file_name": dataset, "clusters": {}}
-    expert_models = []  # Will store tuples: (model_name, model)
+    expert_models = []
 
     for i in range(clusters_no):
         val_windows = clusters[i]["val_windows"]
@@ -72,19 +77,26 @@ def rank_models(dataset, clusters, clusters_no):
         model_results = {}
         best_rmse = float("inf")
         best_model_tuple = None
+        import joblib  # Make sure to import joblib
 
         for model_name in MODELS:
             model_path = (
                 f"/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/"
                 f"expert/expert-models/{dataset}/cluster{i + 1}/{model_name}"
             )
-            checkpoint_file = os.path.join(model_path, "best_model.pth")
-            model_builder = ModelBuilder(model_type=model_name, n_timesteps=WINDOW_SIZE, n_features=HORIZON)
-            model = model_builder.build_model().to(device)
-            # Load the state dict with weights_only=True to avoid the pickle warning.
-            state_dict = torch.load(checkpoint_file, map_location=device, weights_only=True)
-            model.load_state_dict(state_dict)
-            model.eval()
+
+            # For non-torch models:
+            if model_name in ["decision_tree", "random_forest", "xgboost"]:
+                checkpoint_file = os.path.join(model_path, "best_model.pkl")
+                model = joblib.load(checkpoint_file)
+            else:
+                checkpoint_file = os.path.join(model_path, "best_model.pth")
+                model_builder = ModelBuilder(model_type=model_name, n_timesteps=WINDOW_SIZE, horizon=HORIZON)
+                model = model_builder.build_model().to(device)
+                state_dict = torch.load(checkpoint_file, map_location=device, weights_only=True)
+                model.load_state_dict(state_dict)
+
+            # Then evaluate the model...
             rmse_value = eval_val(model, model_name, val_windows, val_labels)
             model_results[model_name] = rmse_value
 
@@ -98,17 +110,20 @@ def rank_models(dataset, clusters, clusters_no):
         models_ranking["clusters"][f"cluster_{i + 1}"] = {"ranking": ranking_list}
         expert_models.append(best_model_tuple)
 
-    json_file_path = f"expert/ranking/{dataset}_ranking.json"
-    with open(json_file_path, "w") as json_file:
+    json_file_path = f"results/experts_ranking"
+
+    if not os.path.exists(json_file_path):
+        print(f"Directory {json_file_path} does not exist. Creating directory...")
+        os.makedirs(json_file_path)
+
+    json_file_name = f"expert/ranking/{dataset}_ranking.json"
+    with open(json_file_name, "w") as json_file:
         json.dump(models_ranking, json_file, indent=4)
-    print(f"Ranking results saved to {json_file_path}")
+    print(f"Ranking results saved to {json_file_name}")
     return expert_models
 
-#############################################
-# Cluster Data
-#############################################
+
 def cluster_data(train):
-    values = train.iloc[:, 1].to_numpy()
     train_norm = scaler.transform(train.iloc[:, 1].values.reshape(-1, 1))
     train_windows, train_labels = util.make_windows(train_norm, WINDOW_SIZE, HORIZON)
     clustering_result = perform_clustering(train_windows)
@@ -127,15 +142,8 @@ def cluster_data(train):
         }
     return clusters, clustering_result.n_clusters, clustering_result.cluster_centers_
 
-#############################################
-# Predict for a Single Test Window
-#############################################
+
 def predict(expert_models, clusters_center, test_window):
-    """
-    For a given test window, determine the closest cluster (using Euclidean distance)
-    and then use the corresponding expert model to predict the output.
-    The test window is processed point-by-point.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     min_euc_dist = float('inf')
     current_window = test_window.reshape(1, -1)
@@ -150,37 +158,48 @@ def predict(expert_models, clusters_center, test_window):
 
     print("---------------------------------------------")
     print(f"Closest cluster index: {closest_cluster_idx}")
-    # Retrieve the expert model tuple: (model_name, model)
     model_name, expert_model = expert_models[closest_cluster_idx]
-    # Prepare test window for prediction based on model type.
-    if model_name == "mlp":
-        # For MLP, if test_window has shape (WINDOW_SIZE, 1) squeeze to (WINDOW_SIZE,)
-        if test_window.ndim == 2 and test_window.shape[1] == 1:
-            test_window = np.squeeze(test_window, axis=1)
-        # Now input should be 1D of length WINDOW_SIZE; add batch dimension.
-        input_tensor = torch.tensor(test_window, dtype=torch.float32, device=device).unsqueeze(0)
+
+    # Branch based on model type.
+    if model_name in ["decision_tree", "random_forest", "xgboost"]:
+        # For non-torch models, ensure the input shape matches training expectations.
+        # Adjust shape if necessary. For example, if training used 2D arrays:
+        if test_window.ndim != 2:
+            test_window = test_window.reshape(1, -1)
+        prediction = expert_model.predict(test_window)
+        prediction = np.array(prediction).squeeze()
     else:
-        # For non-MLP, ensure test_window is 2D (WINDOW_SIZE, HORIZON)
-        if test_window.ndim == 1:
-            test_window = np.expand_dims(test_window, axis=-1)
-        input_tensor = torch.tensor(test_window, dtype=torch.float32, device=device).unsqueeze(0)
-    expert_model.eval()
-    with torch.no_grad():
-        output = expert_model(input_tensor)
-        # Unpack tuple outputs if necessary.
-        if isinstance(output, tuple):
-            output = output[0]
-    prediction = output.cpu().numpy().squeeze()
+        # For torch-based models, adjust the input as before.
+        if model_name == "mlp":
+            if test_window.ndim == 2 and test_window.shape[1] == 1:
+                test_window = np.squeeze(test_window, axis=1)
+            input_tensor = torch.tensor(test_window, dtype=torch.float32, device=device).unsqueeze(0)
+        else:
+            if test_window.ndim == 1:
+                test_window = np.expand_dims(test_window, axis=-1)
+            input_tensor = torch.tensor(test_window, dtype=torch.float32, device=device).unsqueeze(0)
+        expert_model.eval()
+        with torch.no_grad():
+            output = expert_model(input_tensor)
+            if isinstance(output, tuple):
+                output = output[0]
+        prediction = output.cpu().numpy().squeeze()
     return prediction
 
-#############################################
-# Evaluate Expert Models on Test Set (Point-by-Point)
-#############################################
-def evaluate_expert_models(expert_models, test, clusters_center):
+
+def evaluate_expert_models(expert_models, test, clusters_center, training_range):
+    """
+    Evaluates expert models on the test set.
+    Predictions are generated on scaled windows and then inverse-transformed.
+    The RMSE is computed on the original scale and then normalized using
+    the training data's range.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     predictions = []
-    test = scaler.transform(test.iloc[:, 1].values.reshape(-1, 1))
-    test_windows, test_labels = util.make_windows(test, WINDOW_SIZE, HORIZON)
+
+    # Scale test values for window creation
+    test_scaled = scaler.transform(test.iloc[:, 1].values.reshape(-1, 1))
+    test_windows, test_labels = util.make_windows(test_scaled, WINDOW_SIZE, HORIZON)
 
     for t in range(len(test_windows)):
         prediction = predict(expert_models, clusters_center, test_windows[t])
@@ -190,10 +209,42 @@ def evaluate_expert_models(expert_models, test, clusters_center):
     if predictions.ndim == 2 and predictions.shape[1] == 1:
         predictions = np.squeeze(predictions, axis=1)
     labels = np.array(test_labels).squeeze()
-    mse = np.mean((predictions - labels) ** 2)
-    rmse = np.sqrt(mse)
-    result = {"rmse": rmse}
+
+    # Inverse-transform predictions and labels back to the original scale
+    predictions_orig = scaler.inverse_transform(predictions.reshape(-1, 1)).squeeze()
+    labels_orig = scaler.inverse_transform(labels.reshape(-1, 1)).squeeze()
+
+    mse_orig = np.mean((predictions_orig - labels_orig) ** 2)
+    rmse_orig = np.sqrt(mse_orig)
+
+    result = {"expert-models": rmse_orig}
     return result
+
+
+def save_result_csv(dataset_name, result, csv_dir):
+    """
+    Saves (or appends) the result for a given dataset to a CSV file.
+    If result is not a dictionary, it will be stored under the key 'result'.
+    """
+    csv_filename = f"{csv_dir}/expert_results.csv"
+
+    if not os.path.exists(csv_dir):
+        print(f"Directory {csv_dir} does not exist. Creating directory...")
+        os.makedirs(csv_dir)
+
+    if isinstance(result, dict):
+        data = {"dataset": dataset_name, **result}
+    else:
+        data = {"dataset": dataset_name, "result": result}
+    df = pd.DataFrame([data])
+
+    # If the CSV file doesn't exist, write with header; otherwise, append without header.
+    if not os.path.exists(csv_filename):
+        df.to_csv(csv_filename, index=False)
+    else:
+        df.to_csv(csv_filename, index=False, mode='a', header=False)
+    print(f"Results for {dataset_name} saved to {csv_filename}")
+
 
 #############################################
 # Prepare Data and Run Evaluation
@@ -205,17 +256,32 @@ def prepare_data(data_path):
             dataset_name = os.path.splitext(name)[0]
             print("Processing dataset:", dataset_name)
             data = pd.read_csv(os.path.join(data_path, name))
+
+            values = data.iloc[:, 1].values
+            # If there are more than 20,000 rows, select only the first 20,000 and log the confirmation
+            if len(values) > 20000:
+                data = data.iloc[:20000]
+                print(f"Dataset {dataset_name} has more than 20000 rows. Selected the first 20000 rows for processing.")
+
+            print(f"Data shape for {dataset_name} after processing: {data.shape}")
+
             split = int(0.8 * len(data))
             train, test = data[:split], data[split:]
+
+            # Fit the scaler on training data
             scaler.fit(train.iloc[:, 1].values.reshape(-1, 1))
+            # Compute the training range from the original (unscaled) training values
+            train_min = train.iloc[:, 1].min()
+            train_max = train.iloc[:, 1].max()
+            training_range = train_max - train_min
+
             clusters, clusters_no, clusters_center = cluster_data(train)
             expert_models = rank_models(dataset_name, clusters, clusters_no)
             print("Expert models loaded.")
-            result = evaluate_expert_models(expert_models, test, clusters_center)
-            save_result_csv(dataset_name, result, csv_filename="/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/expert/results/expert_results.csv")
+            result = evaluate_expert_models(expert_models, test, clusters_center, training_range)
+            save_result_csv(dataset_name, result,
+                            csv_dir="/Users/aalademi/PycharmProjects/experiment/Model/first_experiment/results/evaluation")
 
-#############################################
-# Main
-#############################################
-test_files_path = "test-models"  # Adjust the path as needed
+
+test_files_path = "test"  # Adjust the path as needed
 prepare_data(test_files_path)

@@ -1,8 +1,4 @@
-import os
-
 import pandas as pd
-import numpy as np
-from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
 from Model import util
@@ -12,12 +8,14 @@ HORIZON = 1
 WINDOW_SIZE = 7
 scaler = StandardScaler()
 
+import os
+import numpy as np
+import matplotlib.pyplot as plt
 
-def plot_clusters(subsequences, labels, cluster_no, window_size, file_name):
+
+def plot_clusters(subsequences_norm, labels, cluster_no, window_size, file_name):
     epsilon = 1e-8
-    subsequences_norm = (subsequences - np.mean(subsequences, axis=1, keepdims=True)) / (
-                np.std(subsequences, axis=1, keepdims=True) + epsilon)
-
+    subsequences = scaler.inverse_transform(subsequences_norm)
     # Define a list of distinct colors for the clusters (will repeat if clusters > len(cluster_colors))
     cluster_colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'pink', 'cyan', 'magenta', 'gray']
 
@@ -28,7 +26,7 @@ def plot_clusters(subsequences, labels, cluster_no, window_size, file_name):
     for cluster in range(cluster_no):
         plt.subplot(rows, 3, cluster + 1)
         # Get standardized series for the current cluster
-        cluster_series = subsequences_norm[labels == cluster]
+        cluster_series = subsequences[labels == cluster]
 
         # Plot each standardized time series in the cluster, flattening in case of extra dimensions
         for series in cluster_series:
@@ -37,8 +35,20 @@ def plot_clusters(subsequences, labels, cluster_no, window_size, file_name):
 
         # Set fixed x-axis limits based on window size
         plt.xlim(1, window_size)
-        # Set consistent y-axis limits for z-scores
-        plt.ylim(-3, 3)  # Common z-score range
+
+        # Set dynamic y-axis limits based on the data in the cluster
+        if cluster_series.size > 0:
+            current_min = np.min(cluster_series)
+            current_max = np.max(cluster_series)
+            # Ensure a visible range if the data is nearly constant
+            if np.isclose(current_min, current_max):
+                current_min -= 1
+                current_max += 1
+            # Add a 5% padding around the data range
+            padding = 0.05 * (current_max - current_min)
+            plt.ylim(current_min - padding, current_max + padding)
+        else:
+            plt.ylim(-3, 3)  # Fallback if there is no data
 
         # Add grid lines with light style
         plt.grid(True, linestyle='--', alpha=0.5, color='gray')
@@ -46,23 +56,19 @@ def plot_clusters(subsequences, labels, cluster_no, window_size, file_name):
         # Add titles and labels for clarity
         plt.title(f'Cluster {cluster + 1}', fontsize=16, fontweight='bold', color='black')
         plt.xlabel("Time Index", fontsize=14, color='black')
-        plt.ylabel("Value (Z-Score)", fontsize=14, color='black')
+        plt.ylabel("Value", fontsize=14, color='black')
 
     # Save the plot as an image file
     plt.tight_layout()
-    save_path = f"cluster_plots/{file_name}_clusters.png"
+    save_path = f"results/clustering_plots/cluster_plots/{file_name}_clusters.png"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)  # Create directory if it doesn't exist
     plt.savefig(save_path)
     plt.close()  # Free memory
     print(f"Saved plot for {file_name} to {save_path}")
 
 
-
 def cluster_data(train):
-    values = train.iloc[:, 1].to_numpy()
-    time_stamp = train.iloc[:, 0].to_numpy()
-    #train_norm = scaler.transform(train.iloc[:, 1].values.reshape(-1, 1))
-    train_windows, train_labels = util.make_windows(train.iloc[:, 1].values.reshape(-1, 1), WINDOW_SIZE, HORIZON)
+    train_windows, train_labels = util.make_windows(train, WINDOW_SIZE, HORIZON)
     clustering_result = perform_clustering(train_windows)
 
     clusters = {}
@@ -103,10 +109,10 @@ def prepare_data(data_path):
 
             split = int(0.8 * len(data))
             train, test = data[:split], data[split:]
-            # Fit the scaler on the training data
             values = train.iloc[:, 1].values
             scaler.fit(values.reshape(-1, 1))
-            clusters, train_windows = cluster_data(train)
+            train_norm = scaler.transform(values.reshape(-1, 1))
+            clusters, train_windows = cluster_data(train_norm)
             plot_clusters(train_windows, clusters.labels_, clusters.n_clusters, WINDOW_SIZE, dataset_name)
 
 

@@ -2,182 +2,154 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
 
+# -----------------------------------------------------------------------------
+# Hyperparameters and Configuration
+# -----------------------------------------------------------------------------
+WINDOW_SIZE = 10      # Number of timesteps per input window
+HORIZON = 1           # Forecast horizon
+LR = 0.001            # Learning rate for torch models
+EPOCHS = 10           # Number of training epochs
+BATCH_SIZE = 32       # Batch size for torch models
 
-###############################################
-# Existing Models (Conv, ConvLSTM, MLP, LSTM, AR, TRMF, LSTNetSkip, DARNN)
-###############################################
+# Update the models list to include the new PyTorch implementations.
+MODELS = [
+    "conv", "mlp", "lstm", "cnn-lstm", "trmf", "lstnet-skip",
+    "darnn", "deepglo", "tft", "deepar", "deepstate", "ar",
+    "decision_tree", "random_forest", "xgboost",
+    "mq-cnn", "deepfactor"
+]
 
+# -----------------------------------------------------------------------------
+# Loss Functions
+# -----------------------------------------------------------------------------
+def gaussian_nll_loss(mean, sigma, target):
+    """
+    Negative log-likelihood for a Gaussian distribution.
+    """
+    eps = 1e-9
+    sigma = torch.clamp(sigma, min=eps)
+    loss = 0.5 * torch.log(sigma ** 2 + eps) + 0.5 * ((target - mean) ** 2 / (sigma ** 2 + eps))
+    return loss.mean()
+
+def trmf_loss(model, x_batch, y_batch, lambda_f=0.01, lambda_g=0.01, lambda_a=0.01):
+    """
+    TRMF loss: MSE reconstruction plus L2 regularization on latent factors.
+    """
+    y_pred = model(x_batch)
+    if y_pred.dim() == 2 and y_pred.size(-1) > 1:
+        mse = F.mse_loss(y_pred, y_batch)
+    else:
+        mse = F.mse_loss(y_pred.squeeze(-1), y_batch.squeeze(-1))
+    reg_f = torch.sum(model.F ** 2)
+    reg_g = torch.sum(model.G ** 2)
+    reg_a = torch.sum(model.A ** 2)
+    return mse + lambda_f * reg_f + lambda_g * reg_g + lambda_a * reg_a
+
+# -----------------------------------------------------------------------------
+# PyTorch Model Definitions
+# -----------------------------------------------------------------------------
+# 1. CNN Model
 class ConvModel(nn.Module):
-    """
-    Implements the "conv" model:
-      Input -> Conv1d (kernel_size=1, filters=32, ReLU) -> Flatten ->
-      Dense(10) -> Dense(20) -> Dense(30) -> Dense(1)
-    """
-
-    def __init__(self, n_timesteps, n_features):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, kernel_size=3, channels=32):
+        super(ConvModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
-        self.conv1 = nn.Conv1d(in_channels=n_features, out_channels=32, kernel_size=1, stride=1)
+        self.horizon = horizon
+        self.conv = nn.Conv1d(in_channels=1, out_channels=channels, kernel_size=kernel_size)
         self.relu = nn.ReLU()
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(32 * n_timesteps, 10)
-        self.fc2 = nn.Linear(10, 20)
-        self.fc3 = nn.Linear(20, 30)
-        self.fc4 = nn.Linear(30, 1)
-
+        conv_out_size = (n_timesteps - kernel_size + 1) * channels
+        self.fc = nn.Sequential(
+            nn.Linear(conv_out_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, horizon)
+        )
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        x = x.permute(0, 2, 1)  # -> (batch, n_features, n_timesteps)
-        x = self.relu(self.conv1(x))
-        x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
-        x = self.fc4(x)
-        return x
+        # x: (batch, n_timesteps, 1)
+        x = x.permute(0, 2, 1)  # -> (batch, 1, n_timesteps)
+        x = self.relu(self.conv(x))
+        x = x.flatten(start_dim=1)
+        return self.fc(x)
 
-
-class ConvLSTMModel(nn.Module):
-    """
-    Implements the "conv-lstm" model:
-      Input -> Conv1d (kernel_size=1, filters=32, ReLU) -> AveragePooling1d ->
-      Transpose -> LSTM (hidden_size=50) -> Dropout(0.2) -> Dense(1)
-    """
-
-    def __init__(self, n_timesteps, n_features):
-        super().__init__()
-        self.n_timesteps = n_timesteps
-        self.n_features = n_features
-        self.conv1 = nn.Conv1d(in_channels=n_features, out_channels=32, kernel_size=1)
-        self.relu = nn.ReLU()
-        self.avgpool = nn.AvgPool1d(kernel_size=1)
-        self.lstm = nn.LSTM(input_size=32, hidden_size=50, batch_first=True)
-        self.dropout = nn.Dropout(0.2)
-        self.fc = nn.Linear(50, 1)
-
-    def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        x = x.permute(0, 2, 1)
-        x = self.relu(self.conv1(x))
-        x = self.avgpool(x)
-        x = x.permute(0, 2, 1)
-        lstm_out, _ = self.lstm(x)
-        x = lstm_out[:, -1, :]
-        x = self.dropout(x)
-        x = self.fc(x)
-        return x
-
-
+# 2. MLP Model
 class MLPModel(nn.Module):
-    """
-    Implements the "mlp" model:
-      Input (vector of size n_timesteps) -> Dense(10) -> Dense(20) -> Dense(30) -> Dense(1)
-    """
-
-    def __init__(self, n_timesteps):
-        super().__init__()
-        self.fc1 = nn.Linear(n_timesteps, 10)
-        self.fc2 = nn.Linear(10, 20)
-        self.fc3 = nn.Linear(20, 30)
-        self.fc4 = nn.Linear(30, 1)
-
+    def __init__(self, n_timesteps, horizon=1):
+        super(MLPModel, self).__init__()
+        self.n_timesteps = n_timesteps
+        self.horizon = horizon
+        self.fc = nn.Sequential(
+            nn.Linear(n_timesteps, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, horizon)
+        )
     def forward(self, x):
-        # x: (batch, n_timesteps)
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
-        x = self.fc4(x)
-        return x
+        # x: (batch, n_timesteps, 1) -> flatten to (batch, n_timesteps)
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
 
-
+# 3. LSTM Model
 class LSTMModel(nn.Module):
-    """
-    Implements the "lstm" model:
-      Input -> LSTM (hidden_size=100, with ReLU on output) -> Dense(1)
-    """
-
-    def __init__(self, n_timesteps, n_features):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size=n_features, hidden_size=100, batch_first=True)
+    def __init__(self, n_timesteps, hidden_size=100, horizon=1):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size=1, hidden_size=hidden_size, batch_first=True)
         self.relu = nn.ReLU()
-        self.fc = nn.Linear(100, 1)
-
+        self.fc = nn.Linear(hidden_size, horizon)
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
+        lstm_out, _ = self.lstm(x)
+        x = lstm_out[:, -1, :]  # Last timestep
+        x = self.relu(x)
+        return self.fc(x)
+
+# 4. CNN-LSTM Model
+class ConvLSTMModel(nn.Module):
+    def __init__(self, n_timesteps, horizon=1, conv_channels=32, lstm_hidden=50, kernel_size=3):
+        super(ConvLSTMModel, self).__init__()
+        self.conv = nn.Conv1d(in_channels=1, out_channels=conv_channels, kernel_size=kernel_size)
+        self.relu = nn.ReLU()
+        self.lstm = nn.LSTM(input_size=conv_channels, hidden_size=lstm_hidden, batch_first=True)
+        self.fc = nn.Linear(lstm_hidden, horizon)
+    def forward(self, x):
+        x = x.permute(0, 2, 1)  # (batch, 1, n_timesteps)
+        x = self.relu(self.conv(x))
+        x = x.permute(0, 2, 1)  # (batch, new_length, conv_channels)
         lstm_out, _ = self.lstm(x)
         x = lstm_out[:, -1, :]
-        x = self.relu(x)
-        x = self.fc(x)
-        return x
+        return self.fc(x)
 
-
-class ARModel(nn.Module):
-    """
-    Implements the "ar" (autoregressive) linear model:
-      Input -> Flatten -> Dense(1)
-    """
-
-    def __init__(self, n_timesteps, n_features):
-        super().__init__()
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(n_timesteps * n_features, 1)
-
-    def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        x = self.flatten(x)
-        x = self.fc(x)
-        return x
-
-
+# 5. TRMF Model
 class TRMFModel(nn.Module):
-    """
-    Implements the Temporal Regularized Matrix Factorization (TRMF) model.
-    """
-
-    def __init__(self, n_timesteps, n_features, rank=5):
-        super().__init__()
+    def __init__(self, n_timesteps, rank=5, horizon=1):
+        super(TRMFModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
         self.rank = rank
-        self.F = nn.Parameter(torch.randn(n_timesteps, rank))
-        self.G = nn.Parameter(torch.randn(rank, n_features))
-        self.A = nn.Parameter(torch.eye(rank))
-        self.bias = nn.Parameter(torch.zeros(n_features))
-
+        self.horizon = horizon
+        self.F = nn.Parameter(torch.randn(n_timesteps, rank))  # latent factors
+        self.G = nn.Parameter(torch.randn(rank, 1))            # factor loadings
+        self.A = nn.Parameter(torch.eye(rank))                 # transition matrix
+        self.bias = nn.Parameter(torch.zeros(1))
+        self.x_linear = nn.Linear(1, 1)
+        self.fc_horizon = nn.Linear(1, horizon)
     def forward(self, x):
-        # Compute the latent factor prediction as before
         f_last = self.F[-1]
         f_next = self.A @ f_last
-        latent_pred = f_next @ self.G + self.bias  # (n_features,)
+        latent_pred = f_next @ self.G + self.bias
+        x_last = x[:, -1, :]
+        x_component = self.x_linear(x_last)
+        combined = latent_pred.unsqueeze(0) + x_component
+        return self.fc_horizon(combined)
 
-        # Compute an additional component from x, for example, a simple linear projection of the last timestep
-        x_last = x[:, -1, :]  # (batch, n_features)
-        x_component = nn.Linear(self.n_features, self.n_features).to(x.device)(x_last)
-
-        # Combine both predictions
-        combined_pred = latent_pred + x_component.mean(dim=0)
-
-        batch_size = x.shape[0]
-        combined_pred = combined_pred.unsqueeze(0).repeat(batch_size, 1)
-        return combined_pred
-
-    def reconstruction(self):
-        return self.F @ self.G + self.bias
-
-
+# 6. LSTNet-Skip Model
 class LSTNetSkipModel(nn.Module):
-    """
-    Implements a simplified version of the LSTNet model with skip connections.
-    """
-
-    def __init__(self, n_timesteps, n_features,
-                 kernel_size=3, conv_channels=50, rnn_hidden_size=100,
-                 skip=2, skip_rnn_hidden_size=50, highway_window=3, dropout=0.2):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, kernel_size=3, conv_channels=50,
+                 rnn_hidden_size=100, skip=2, skip_rnn_hidden_size=50, highway_window=3,
+                 dropout=0.2):
+        super(LSTNetSkipModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.kernel_size = kernel_size
         self.conv_channels = conv_channels
         self.rnn_hidden_size = rnn_hidden_size
@@ -187,27 +159,24 @@ class LSTNetSkipModel(nn.Module):
 
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        self.conv = nn.Conv1d(in_channels=n_features, out_channels=conv_channels, kernel_size=kernel_size)
+        self.conv = nn.Conv1d(in_channels=1, out_channels=conv_channels, kernel_size=kernel_size)
         self.gru = nn.GRU(input_size=conv_channels, hidden_size=rnn_hidden_size, batch_first=True)
         self.skip_gru = nn.GRU(input_size=conv_channels, hidden_size=skip_rnn_hidden_size, batch_first=True)
         self.pt = (n_timesteps - kernel_size + 1) // skip
-        self.fc = nn.Linear(rnn_hidden_size + self.pt * skip_rnn_hidden_size, n_features)
+        self.fc = nn.Linear(rnn_hidden_size + self.pt * skip_rnn_hidden_size, horizon)
         if highway_window > 0:
-            self.highway = nn.Linear(highway_window, 1)
+            self.highway = nn.Linear(highway_window, horizon)
         else:
             self.highway = None
-
     def forward(self, x):
         batch_size = x.size(0)
         c = x.permute(0, 2, 1)
         c = self.relu(self.conv(c))
         c = self.dropout(c)
         L = c.size(2)
-
         rnn_input = c.permute(0, 2, 1)
         rnn_output, _ = self.gru(rnn_input)
         h_main = rnn_output[:, -1, :]
-
         pt = self.pt
         if pt > 0 and L >= pt * self.skip:
             s = c[:, :, -pt * self.skip:]
@@ -219,90 +188,56 @@ class LSTNetSkipModel(nn.Module):
             s_last = s_last.view(batch_size, pt * self.skip_rnn_hidden_size)
         else:
             s_last = torch.zeros(batch_size, self.pt * self.skip_rnn_hidden_size, device=x.device)
-
         combined = torch.cat([h_main, s_last], dim=1)
         res = self.fc(combined)
-
         if self.highway is not None:
             if self.highway_window > x.size(1):
                 hw = x[:, -x.size(1):, :]
             else:
                 hw = x[:, -self.highway_window:, :]
-            hw = hw.permute(0, 2, 1)
-            hw = self.highway(hw)
-            hw = hw.squeeze(-1)
-            res = res + hw
-
+            hw = hw.permute(0, 2, 1).squeeze(1)
+            hw_out = self.highway(hw)
+            res = res + hw_out
         return res
 
-
+# 7. DARNN Model
 class DARNNModel(nn.Module):
-    """
-    Implements a simplified version of the Dual-Stage Attention-Based RNN (DARNN).
-
-    Architecture Overview:
-      Encoder (Input-Attention Stage):
-        - For each time step, an input-attention mechanism computes weights over the n_features,
-          producing a weighted input vector that is fed to a GRU cell.
-      Decoder (Temporal-Attention Stage):
-        - A decoder GRUCell uses a learned initial input.
-        - Temporal attention is applied over all encoder hidden states to produce a context vector.
-      Final Prediction:
-        - The decoder hidden state and context vector are concatenated and passed through a linear layer
-          to produce the forecast.
-    """
-
-    def __init__(self, n_timesteps, n_features,
-                 encoder_hidden_size=64, decoder_hidden_size=64, attention_dim=32):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, encoder_hidden_size=64, decoder_hidden_size=64, attention_dim=32):
+        super(DARNNModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.encoder_hidden_size = encoder_hidden_size
         self.decoder_hidden_size = decoder_hidden_size
         self.attention_dim = attention_dim
-
-        # Encoder: GRUCell that takes weighted input (dim = n_features)
-        self.encoder_gru = nn.GRUCell(input_size=n_features, hidden_size=encoder_hidden_size)
-
-        # Input Attention parameters
+        self.encoder_gru = nn.GRUCell(input_size=1, hidden_size=encoder_hidden_size)
         self.W_e = nn.Linear(encoder_hidden_size, attention_dim, bias=False)
-        self.U_e = nn.Parameter(torch.Tensor(n_features, attention_dim))
-        self.b_e = nn.Parameter(torch.Tensor(n_features, attention_dim))
+        self.U_e = nn.Parameter(torch.Tensor(1, attention_dim))
+        self.b_e = nn.Parameter(torch.Tensor(1, attention_dim))
         self.v_e = nn.Parameter(torch.Tensor(attention_dim))
         nn.init.xavier_uniform_(self.U_e)
         nn.init.zeros_(self.b_e)
         nn.init.xavier_uniform_(self.W_e.weight)
         nn.init.uniform_(self.v_e, -0.1, 0.1)
-
-        # Decoder:
         self.fc_init = nn.Linear(encoder_hidden_size, decoder_hidden_size)
         self.decoder_gru = nn.GRUCell(input_size=1, hidden_size=decoder_hidden_size)
-
-        # Temporal Attention parameters
         self.W_d = nn.Linear(decoder_hidden_size, attention_dim, bias=False)
         self.U_d = nn.Linear(encoder_hidden_size, attention_dim, bias=False)
         self.v_d = nn.Parameter(torch.Tensor(attention_dim))
         nn.init.xavier_uniform_(self.W_d.weight)
         nn.init.xavier_uniform_(self.U_d.weight)
         nn.init.uniform_(self.v_d, -0.1, 0.1)
-
-        # Final output layer
         self.fc_out = nn.Linear(decoder_hidden_size + encoder_hidden_size, 1)
         self.y0 = nn.Parameter(torch.zeros(1))
-
     def forward(self, x):
-        batch_size, T, n_features = x.size()
+        batch_size, T, _ = x.size()
         device = x.device
-
-        # Encoder with input attention
         h = torch.zeros(batch_size, self.encoder_hidden_size, device=device)
         encoder_hiddens = []
         for t in range(T):
-            x_t = x[:, t, :]  # (batch, n_features)
-            h_proj = self.W_e(h)  # (batch, attention_dim)
-            h_proj_expanded = h_proj.unsqueeze(1).expand(-1, n_features, -1)
-            x_t_expanded = x_t.unsqueeze(-1)
-            x_proj = x_t_expanded * self.U_e.unsqueeze(0)
+            x_t = x[:, t, :]
+            h_proj = self.W_e(h)
+            h_proj_expanded = h_proj.unsqueeze(1)
+            x_proj = x_t.unsqueeze(-1) * self.U_e.unsqueeze(0)
             attn_input = h_proj_expanded + x_proj + self.b_e.unsqueeze(0)
             attn_scores = torch.tanh(attn_input)
             scores = torch.sum(attn_scores * self.v_e, dim=2)
@@ -312,357 +247,318 @@ class DARNNModel(nn.Module):
             encoder_hiddens.append(h)
         H = torch.stack(encoder_hiddens, dim=1)
         h_T = h
-
-        # Decoder with temporal attention
         d = self.fc_init(h_T)
-        y0 = self.y0.expand(batch_size, 1)
-        d = self.decoder_gru(y0, d)
-        d_proj = self.W_d(d).unsqueeze(1).expand(-1, T, -1)
-        H_proj = self.U_d(H)
-        attn_temp = torch.tanh(d_proj + H_proj)
-        temp_scores = torch.sum(attn_temp * self.v_d, dim=2)
-        beta = F.softmax(temp_scores, dim=1)
-        beta_expanded = beta.unsqueeze(2)
-        context = torch.sum(beta_expanded * H, dim=1)
-        dec_concat = torch.cat([d, context], dim=1)
-        output = self.fc_out(dec_concat)
-        return output
+        outputs = []
+        dec_input = self.y0.expand(batch_size, 1)
+        for _ in range(self.horizon):
+            d = self.decoder_gru(dec_input, d)
+            d_proj = self.W_d(d).unsqueeze(1).expand(-1, T, -1)
+            H_proj = self.U_d(H)
+            attn_temp = torch.tanh(d_proj + H_proj)
+            temp_scores = torch.sum(attn_temp * self.v_d, dim=2)
+            beta = F.softmax(temp_scores, dim=1).unsqueeze(2)
+            context = torch.sum(beta * H, dim=1)
+            dec_concat = torch.cat([d, context], dim=1)
+            out_t = self.fc_out(dec_concat)
+            outputs.append(out_t)
+            dec_input = out_t
+        outputs = torch.cat(outputs, dim=1)
+        return outputs
 
-
-###############################################
-# New Model: Deep Global Local Forecaster (DeepGlo)
-###############################################
-
+# 8. DeepGlo Model
 class DeepGloModel(nn.Module):
-    """
-    Implements a simplified version of the Deep Global Local Forecaster (DeepGlo).
-
-    Architecture Overview:
-      Global Component:
-        - An LSTM processes the entire input sequence to capture global temporal patterns.
-        - The last hidden state is projected to produce a global forecast.
-      Local Component:
-        - The most recent 'local_window' time steps are flattened and processed via an MLP
-          to capture local patterns.
-      Fusion:
-        - Global and local forecasts are concatenated and passed through a linear layer
-          to produce the final forecast.
-
-    Hyperparameters (defaults):
-      - global_hidden_size: 64
-      - local_hidden_size: 32
-      - local_window: 3 (must be <= n_timesteps)
-    """
-
-    def __init__(self, n_timesteps, n_features,
-                 global_hidden_size=64, local_hidden_size=32, local_window=3, dropout=0.2):
-        super().__init__()
-        self.n_timesteps = n_timesteps
-        self.n_features = n_features
-        self.global_hidden_size = global_hidden_size
-        self.local_hidden_size = local_hidden_size
-        self.local_window = local_window
-
-        # Global Component: LSTM over the entire sequence
-        self.global_lstm = nn.LSTM(input_size=n_features, hidden_size=global_hidden_size, batch_first=True)
-        self.global_fc = nn.Linear(global_hidden_size, n_features)
-
-        # Local Component: MLP on the most recent 'local_window' time steps
+    def __init__(self, n_timesteps, horizon=1, global_hidden_size=64, local_hidden_size=32, local_window=3, dropout=0.2):
+        super(DeepGloModel, self).__init__()
         if local_window > n_timesteps:
-            raise ValueError("local_window must be less than or equal to n_timesteps")
-        self.local_fc1 = nn.Linear(local_window * n_features, local_hidden_size)
-        self.local_fc2 = nn.Linear(local_hidden_size, n_features)
-
-        # Fusion Layer: combines global and local predictions
-        self.fusion_fc = nn.Linear(n_features * 2, n_features)
-
+            raise ValueError("local_window must be <= n_timesteps")
+        self.n_timesteps = n_timesteps
+        self.horizon = horizon
+        self.local_window = local_window
+        self.global_lstm = nn.LSTM(input_size=1, hidden_size=global_hidden_size, batch_first=True)
+        self.global_fc = nn.Linear(global_hidden_size, horizon)
+        self.local_fc1 = nn.Linear(local_window, local_hidden_size)
+        self.local_fc2 = nn.Linear(local_hidden_size, horizon)
+        self.fusion_fc = nn.Linear(horizon * 2, horizon)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
         batch_size = x.size(0)
-
-        # Global Component
-        global_out, (h_n, _) = self.global_lstm(x)  # h_n: (1, batch, global_hidden_size)
-        h_global = h_n.squeeze(0)  # (batch, global_hidden_size)
-        global_pred = self.global_fc(h_global)  # (batch, n_features)
-
-        # Local Component: use the last 'local_window' time steps
-        local_input = x[:, -self.local_window:, :]  # (batch, local_window, n_features)
-        local_input_flat = local_input.reshape(batch_size, -1)  # (batch, local_window * n_features)
-        local_hidden = self.relu(self.local_fc1(local_input_flat))
-        local_pred = self.local_fc2(local_hidden)  # (batch, n_features)
-
-        # Fusion of global and local predictions
-        combined = torch.cat([global_pred, local_pred], dim=1)  # (batch, 2*n_features)
-        fused = self.fusion_fc(combined)  # (batch, n_features)
+        global_out, (h_n, _) = self.global_lstm(x)
+        h_global = h_n[-1]
+        global_pred = self.global_fc(h_global)
+        local_input = x[:, -self.local_window:, :].squeeze(-1)
+        local_hidden = self.relu(self.local_fc1(local_input))
+        local_pred = self.local_fc2(local_hidden)
+        combined = torch.cat([global_pred, local_pred], dim=1)
+        fused = self.fusion_fc(combined)
         fused = self.dropout(fused)
         return fused
 
+# 9. Gated Residual Network (for TFT)
+class GatedResidualNetwork(nn.Module):
+    def __init__(self, d_model, dropout=0.1):
+        super(GatedResidualNetwork, self).__init__()
+        self.linear1 = nn.Linear(d_model, d_model)
+        self.linear2 = nn.Linear(d_model, d_model)
+        self.elu = nn.ELU()
+        self.dropout = nn.Dropout(dropout)
+        self.gate = nn.Linear(d_model, d_model)
+    def forward(self, x):
+        residual = x
+        x = self.linear1(x)
+        x = self.elu(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        gating = torch.sigmoid(self.gate(residual))
+        return residual + x * gating
 
-###############################################
-# New Model: Simplified Temporal Fusion Transformer (TFT)
-###############################################
-
+# 10. Positional Encoding (for TFT)
 class PositionalEncoding(nn.Module):
-    """
-    Implements the standard Positional Encoding as used in Transformers.
-    """
-
     def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super().__init__()
+        super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
-
-        # Create constant 'pe' matrix with values dependent on pos and i
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) *
-                             (-math.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float)*(-math.log(10000.0)/d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # shape: (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
-
     def forward(self, x):
-        # x: (batch, seq_len, d_model)
-        x = x + self.pe[:, :x.size(1)]
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len, :]
         return self.dropout(x)
 
-
+# 11. TFT Model
 class TFTModel(nn.Module):
-    """
-    A simplified version of the Temporal Fusion Transformer (TFT).
-
-    This implementation projects the input features to a model dimension,
-    adds positional encoding, passes the sequence through a Transformer encoder,
-    and then uses the last time step's representation for forecasting.
-
-    Note: A full TFT would include additional gating, variable selection, and
-    interpretable attention mechanisms.
-    """
-
-    def __init__(self, n_timesteps, n_features, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
+        super(TFTModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.d_model = d_model
-
-        # Project input features to the model dimension.
-        self.input_projection = nn.Linear(n_features, d_model)
-
-        # Positional encoding.
+        self.input_projection = nn.Linear(1, d_model)
+        self.grn = GatedResidualNetwork(d_model, dropout=dropout)
         self.positional_encoding = PositionalEncoding(d_model, dropout=dropout, max_len=n_timesteps)
-
-        # Transformer encoder layers.
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, dropout=dropout)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        # Final prediction layer. Output dimension is set to n_features.
-        self.fc = nn.Linear(d_model, n_features)
-        self.dropout = nn.Dropout(dropout)
-
+        self.fc_out = nn.Linear(d_model, horizon)
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        x = self.input_projection(x)  # (batch, n_timesteps, d_model)
-        x = self.positional_encoding(x)  # (batch, n_timesteps, d_model)
+        x = self.input_projection(x)
+        x = self.grn(x)
+        x = self.positional_encoding(x)
+        x = x.permute(1, 0, 2)  # (n_timesteps, batch, d_model)
+        x = self.transformer_encoder(x)
+        x = x[-1]
+        return self.fc_out(x)
 
-        # Transformer expects input of shape (seq_len, batch, d_model)
-        x = x.permute(1, 0, 2)
-        x = self.transformer_encoder(x)  # (n_timesteps, batch, d_model)
-
-        # Use the representation from the last time step for forecasting.
-        x = x[-1]  # (batch, d_model)
-        x = self.dropout(x)
-        x = self.fc(x)  # (batch, n_features)
-        return x
-
-
-###############################################
-# New Model: Simplified DeepAR Model
-###############################################
-
+# 12. DeepAR Model
 class DeepARModel(nn.Module):
-    """
-    A simplified implementation of the DeepAR model.
-
-    This model uses an LSTM to encode the input time series and outputs
-    parameters (mean and standard deviation) of a Gaussian distribution for forecasting.
-
-    Note: In practice, DeepAR is a probabilistic forecasting model trained with likelihood loss.
-    """
-
-    def __init__(self, n_timesteps, n_features, hidden_size=64, num_layers=1, dropout=0.1):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, hidden_size=64, num_layers=1, dropout=0.1):
+        super(DeepARModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-
-        self.lstm = nn.LSTM(input_size=n_features, hidden_size=hidden_size,
-                            num_layers=num_layers, batch_first=True, dropout=dropout)
-
+        self.lstm = nn.LSTM(input_size=1, hidden_size=hidden_size, num_layers=num_layers,
+                            batch_first=True, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
-        # Output both mean and log(sigma) for each feature.
-        self.fc = nn.Linear(hidden_size, n_features * 2)
-
+        self.fc_out = nn.Linear(hidden_size, 2)  # (mean, log_sigma)
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        out, _ = self.lstm(x)
-        # Use the last time step's hidden state.
-        last_hidden = out[:, -1, :]
-        last_hidden = self.dropout(last_hidden)
-        params = self.fc(last_hidden)  # (batch, n_features*2)
-        mean, log_sigma = params.chunk(2, dim=1)
-        sigma = torch.exp(log_sigma)
-        return mean, sigma
+        batch_size = x.size(0)
+        out, (h, c) = self.lstm(x)
+        means = []
+        sigmas = []
+        last_input = x[:, -1, :]
+        for _ in range(self.horizon):
+            out_step, (h, c) = self.lstm(last_input.unsqueeze(1), (h, c))
+            out_step = self.dropout(out_step[:, -1, :])
+            params = self.fc_out(out_step)
+            mean, log_sigma = params.split(1, dim=1)
+            sigma = torch.exp(log_sigma)
+            means.append(mean)
+            sigmas.append(sigma)
+            last_input = mean
+        means = torch.cat(means, dim=1)
+        sigmas = torch.cat(sigmas, dim=1)
+        return means, sigmas
 
-
-###############################################
-# New Model: Simplified Deep State Space Model (DeepState)
-###############################################
-
+# 13. DeepState Model
 class DeepStateModel(nn.Module):
-    """
-    A simplified deep state space model.
-
-    This model uses a GRU-based state transition (state encoder) and an emission
-    network to produce forecasts from the latent state. In a full state space model,
-    you might also incorporate stochasticity in the state transitions and
-    perform Bayesian inference.
-    """
-
-    def __init__(self, n_timesteps, n_features, hidden_size=64, num_layers=1, dropout=0.1):
-        super().__init__()
+    def __init__(self, n_timesteps, horizon=1, hidden_size=64, num_layers=1, dropout=0.1):
+        super(DeepStateModel, self).__init__()
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-
-        # State encoder (transition function)
-        self.state_rnn = nn.GRU(input_size=n_features, hidden_size=hidden_size,
-                                num_layers=num_layers, batch_first=True, dropout=dropout)
-        # Emission network: maps latent state to observation space.
-        self.emission = nn.Linear(hidden_size, n_features)
+        self.state_rnn = nn.GRU(1, hidden_size, num_layers=num_layers,
+                                batch_first=True, dropout=dropout)
+        self.emission = nn.Linear(hidden_size, 1)
         self.dropout = nn.Dropout(dropout)
-
     def forward(self, x):
-        # x: (batch, n_timesteps, n_features)
-        state, _ = self.state_rnn(x)
-        # Use the final state's representation for forecasting.
-        last_state = state[:, -1, :]
+        out, h = self.state_rnn(x)
+        last_state = out[:, -1, :]
         last_state = self.dropout(last_state)
-        y_pred = self.emission(last_state)
-        return y_pred
+        if self.horizon == 1:
+            return self.emission(last_state)
+        else:
+            h_state = h[-1]
+            outputs = []
+            last_input = x[:, -1, :]
+            gru_cell = nn.GRUCell(input_size=1, hidden_size=self.hidden_size).to(x.device)
+            for name, param in self.state_rnn.named_parameters():
+                if 'weight_ih_l0' in name:
+                    gru_cell.weight_ih.data.copy_(param.data)
+                if 'weight_hh_l0' in name:
+                    gru_cell.weight_hh.data.copy_(param.data)
+                if 'bias_ih_l0' in name:
+                    gru_cell.bias_ih.data.copy_(param.data)
+                if 'bias_hh_l0' in name:
+                    gru_cell.bias_hh.data.copy_(param.data)
+            for _ in range(self.horizon):
+                h_state = gru_cell(last_input, h_state)
+                h_state_drop = self.dropout(h_state)
+                y_t = self.emission(h_state_drop)
+                outputs.append(y_t)
+                last_input = y_t
+            return torch.cat(outputs, dim=1)
 
+# 14. AR Model
+class ARModel(nn.Module):
+    def __init__(self, n_timesteps, horizon=1):
+        super(ARModel, self).__init__()
+        self.n_timesteps = n_timesteps
+        self.horizon = horizon
+        self.coeffs = nn.Parameter(torch.randn(n_timesteps))
+        self.bias = nn.Parameter(torch.zeros(1))
+    def forward(self, x):
+        # x: (batch, n_timesteps, 1) -> (batch, n_timesteps)
+        x = x.squeeze(-1)
+        if self.horizon == 1:
+            return (x * self.coeffs).sum(dim=1, keepdim=True) + self.bias
+        else:
+            window = x
+            forecasts = []
+            for _ in range(self.horizon):
+                yhat = (window * self.coeffs).sum(dim=1, keepdim=True) + self.bias
+                forecasts.append(yhat)
+                window = torch.cat([window[:, 1:], yhat], dim=1)
+            return torch.cat(forecasts, dim=1)
 
-###############################################
+# -----------------------------------------------------------------------------
+# New PyTorch Implementations for GluonTS-style Models
+# -----------------------------------------------------------------------------
+class GluonTS_MQCNN(nn.Module):
+    def __init__(self, n_timesteps, horizon=1, num_quantiles=3, channels=32, kernel_size=3, dropout=0.1):
+        """
+        GluonTS-style MQ-CNN model in PyTorch.
+        Uses two convolution layers (with padding) followed by dropout and a dense layer
+        to produce forecasts for multiple quantiles.
+        """
+        super(GluonTS_MQCNN, self).__init__()
+        self.n_timesteps = n_timesteps
+        self.horizon = horizon
+        self.num_quantiles = num_quantiles
+        padding = kernel_size // 2  # Preserve sequence length
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=channels, kernel_size=kernel_size, padding=padding)
+        self.conv2 = nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=kernel_size, padding=padding)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(channels * n_timesteps, horizon * num_quantiles)
+    def forward(self, x):
+        # x: (batch, n_timesteps, 1)
+        x = x.permute(0, 2, 1)  # -> (batch, 1, n_timesteps)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.dropout(x)
+        x = x.flatten(start_dim=1)
+        out = self.fc(x)
+        out = out.view(-1, self.horizon, self.num_quantiles)
+        return out
+
+class GluonTS_DeepFactor(nn.Module):
+    def __init__(self, n_timesteps, horizon=1, num_factors=5, rnn_hidden=64, fc_hidden=32):
+        """
+        GluonTS-style DeepFactor model in PyTorch.
+        Combines learnable global factors with a local GRU to produce dynamic mixing weights.
+        Each global factor is passed through a small forecast network.
+        """
+        super(GluonTS_DeepFactor, self).__init__()
+        self.n_timesteps = n_timesteps
+        self.horizon = horizon
+        self.num_factors = num_factors
+        self.rnn = nn.GRU(input_size=1, hidden_size=rnn_hidden, batch_first=True)
+        self.fc_mixing = nn.Linear(rnn_hidden, num_factors * horizon)
+        self.factor_forecast = nn.Sequential(
+            nn.Linear(n_timesteps, fc_hidden),
+            nn.ReLU(),
+            nn.Linear(fc_hidden, horizon)
+        )
+        self.global_factors = nn.Parameter(torch.randn(num_factors, n_timesteps))
+    def forward(self, x):
+        # x: (batch, n_timesteps, 1)
+        batch_size = x.size(0)
+        _, h = self.rnn(x)  # h: (1, batch, rnn_hidden)
+        h = h.squeeze(0)    # -> (batch, rnn_hidden)
+        mixing = self.fc_mixing(h)  # (batch, num_factors * horizon)
+        mixing = mixing.view(batch_size, self.horizon, self.num_factors)  # (batch, horizon, num_factors)
+        factor_forecasts = []
+        for i in range(self.num_factors):
+            # Process the global factor vector through the forecast network.
+            factor_i = self.global_factors[i].unsqueeze(0)  # (1, n_timesteps)
+            forecast_i = self.factor_forecast(factor_i)       # (1, horizon)
+            factor_forecasts.append(forecast_i)
+        factor_forecasts = torch.cat(factor_forecasts, dim=0)  # (num_factors, horizon)
+        factor_forecasts = factor_forecasts.transpose(0, 1)      # (horizon, num_factors)
+        forecasts = []
+        for t in range(self.horizon):
+            # Combine mixing weights with factor forecasts for each time step.
+            f_t = (mixing[:, t, :] * factor_forecasts[t]).sum(dim=1, keepdim=True)
+            forecasts.append(f_t)
+        forecasts = torch.cat(forecasts, dim=1)  # (batch, horizon)
+        return forecasts
+
+# -----------------------------------------------------------------------------
 # Model Builder
-###############################################
-
+# -----------------------------------------------------------------------------
 class ModelBuilder:
-    """
-    A builder class to create different PyTorch models based on a string identifier.
-
-    Options include: 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar', 'trmf', 'lstnet-skip', 'darnn',
-    'deepglo', 'tft', 'deepar', and 'deepstate'.
-    """
-
-    def __init__(self, model_type="conv", n_timesteps=None, n_features=None, rank=5):
+    def __init__(self, model_type="lstm", n_timesteps=10, horizon=1, rank=5,
+                 rf_n_estimators=100, rf_max_depth=None,
+                 decision_tree_max_depth=None, xgb_max_depth=None):
         self.model_type = model_type
         self.n_timesteps = n_timesteps
-        self.n_features = n_features
+        self.horizon = horizon
         self.rank = rank
-        self.model = None
+        self.rf_n_estimators = rf_n_estimators
+        self.rf_max_depth = rf_max_depth
+        self.decision_tree_max_depth = decision_tree_max_depth
+        self.xgb_max_depth = xgb_max_depth
 
     def build_model(self):
-        if self.model_type == "conv":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'conv' model.")
-            self.model = ConvModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "conv-lstm":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'conv-lstm' model.")
-            self.model = ConvLSTMModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "mlp":
-            if self.n_timesteps is None:
-                raise ValueError("n_timesteps must be provided for the 'mlp' model.")
-            self.model = MLPModel(self.n_timesteps)
-        elif self.model_type == "lstm":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'lstm' model.")
-            self.model = LSTMModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "ar":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'ar' model.")
-            self.model = ARModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "trmf":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'trmf' model.")
-            self.model = TRMFModel(self.n_timesteps, self.n_features, rank=self.rank)
-        elif self.model_type == "lstnet-skip":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'lstnet-skip' model.")
-            self.model = LSTNetSkipModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "darnn":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'darnn' model.")
-            self.model = DARNNModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "deepglo":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'deepglo' model.")
-            self.model = DeepGloModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "tft":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'tft' model.")
-            self.model = TFTModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "deepar":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'deepar' model.")
-            self.model = DeepARModel(self.n_timesteps, self.n_features)
-        elif self.model_type == "deepstate":
-            if self.n_timesteps is None or self.n_features is None:
-                raise ValueError("n_timesteps and n_features must be provided for the 'deepstate' model.")
-            self.model = DeepStateModel(self.n_timesteps, self.n_features)
-        else:
-            raise ValueError(
-                "Invalid model type. Choose from 'conv', 'conv-lstm', 'mlp', 'lstm', 'ar', 'trmf', 'lstnet-skip', 'darnn', 'deepglo', 'tft', 'deepar', or 'deepstate'.")
-        return self.model
+        model_factories = {
+            "conv": lambda: ConvModel(self.n_timesteps, horizon=self.horizon),
+            "mlp": lambda: MLPModel(self.n_timesteps, horizon=self.horizon),
+            "lstm": lambda: LSTMModel(self.n_timesteps, horizon=self.horizon),
+            "cnn-lstm": lambda: ConvLSTMModel(self.n_timesteps, horizon=self.horizon),
+            "trmf": lambda: TRMFModel(self.n_timesteps, rank=self.rank, horizon=self.horizon),
+            "lstnet-skip": lambda: LSTNetSkipModel(self.n_timesteps, horizon=self.horizon),
+            "darnn": lambda: DARNNModel(self.n_timesteps, horizon=self.horizon),
+            "deepglo": lambda: DeepGloModel(self.n_timesteps, horizon=self.horizon),
+            "tft": lambda: TFTModel(self.n_timesteps, horizon=self.horizon),
+            "deepar": lambda: DeepARModel(self.n_timesteps, horizon=self.horizon),
+            "deepstate": lambda: DeepStateModel(self.n_timesteps, horizon=self.horizon),
+            "ar": lambda: ARModel(self.n_timesteps, horizon=self.horizon),
+            "decision_tree": lambda: DecisionTreeRegressor(max_depth=self.decision_tree_max_depth),
+            "random_forest": lambda: RandomForestRegressor(n_estimators=self.rf_n_estimators,
+                                                           max_depth=self.rf_max_depth),
+            "xgboost": lambda: XGBRegressor(max_depth=self.xgb_max_depth),
+            "mq-cnn": lambda: GluonTS_MQCNN(self.n_timesteps, horizon=self.horizon),
+            "deepfactor": lambda: GluonTS_DeepFactor(self.n_timesteps, horizon=self.horizon)
+        }
+
+        try:
+            return model_factories[self.model_type]()
+        except KeyError:
+            raise ValueError(f"Invalid model type '{self.model_type}'!")
 
     @staticmethod
     def get_available_models():
-        """
-        Returns a list of available model names.
-        """
-        return [
-            "conv", "conv-lstm", "mlp", "lstm", "ar", "trmf",
-            "lstnet-skip", "darnn", "deepglo", "tft", "deepar", "deepstate"
-        ]
-
-
-###############################################
-# Example Usage
-###############################################
-
-if __name__ == '__main__':
-    n_timesteps = 10
-    n_features = 1
-
-    # Print available models
-    print("Available models:", ModelBuilder.get_available_models())
-
-    # Change model_type to one of:
-    # "conv", "conv-lstm", "mlp", "lstm", "ar", "trmf", "lstnet-skip",
-    # "darnn", "deepglo", "tft", "deepar", or "deepstate".
-    builder = ModelBuilder(model_type="deepar", n_timesteps=n_timesteps, n_features=n_features)
-    model = builder.build_model()
-    print(model)
-
-    dummy_input = torch.randn(8, n_timesteps, n_features)
-    if builder.model_type == "deepar":
-        mean, sigma = model(dummy_input)
-        print("Mean shape:", mean.shape)
-        print("Sigma shape:", sigma.shape)
-    else:
-        output = model(dummy_input)
-        print("Output shape:", output.shape)
+        return MODELS

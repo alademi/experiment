@@ -4,9 +4,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import mean_squared_error, r2_score, silhouette_score
-from tslearn.clustering import KShape
+from tslearn.clustering import KShape, TimeSeriesKMeans
 
 MODELS = ["conv", "conv-lstm", "lstm" ,"mlp", "ar"]
 
@@ -47,39 +47,41 @@ def evaluate_preds(y_true, y_pred, scaler):
     }
 
 
-def compute_clusters_kshape(subsequences):
-    # Ensure the data is 2D: (n_samples, time_steps)
-    if subsequences.ndim > 2:
-        n_samples = subsequences.shape[0]
-        subsequences = subsequences.reshape(n_samples, -1)
+def reshape_subsequences(subsequences):
 
-    # Evaluate a range of clusters to determine the optimal number via silhouette score.
-    # Note: silhouette_score here uses Euclidean distance. Although not the exact shape-based distance,
-    # it can serve as a proxy since the subsequences are already z-normalized.
-    range_n_clusters = range(2, 11)
+    if subsequences.ndim > 2:
+        return subsequences.reshape(subsequences.shape[0], -1)
+    return subsequences
+
+
+def compute_optimal_clusters(subsequences, cluster_range=range(3, 11)):
+    subsequences = reshape_subsequences(subsequences)
     silhouette_scores = []
 
-    for n_clusters in range_n_clusters:
-        kshape = KShape(n_clusters=n_clusters, random_state=0)
-        labels = kshape.fit_predict(subsequences)
-        score = silhouette_score(subsequences, labels, metric="euclidean")
+    for n_clusters in cluster_range:
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
+        labels = kmeans.fit_predict(subsequences)
+        score = silhouette_score(subsequences, labels, n_jobs=-1)
         silhouette_scores.append(score)
 
-    optimal_n_clusters = range_n_clusters[np.argmax(silhouette_scores)]
-    print(f"Optimal number of clusters: {optimal_n_clusters}")
-    return optimal_n_clusters
+    optimal_clusters = cluster_range[np.argmax(silhouette_scores)]
+    print(f"Optimal number of clusters: {optimal_clusters}")
+    return optimal_clusters
 
 
-def perform_clustering(subsequences):
-    # Ensure the data is 2D: (n_samples, time_steps)
-    if subsequences.ndim > 2:
-        n_samples = subsequences.shape[0]
-        subsequences = subsequences.reshape(n_samples, -1)
+def perform_clustering(subsequences, use_minibatch=False):
+    subsequences = reshape_subsequences(subsequences)
+    n_clusters = compute_optimal_clusters(subsequences)
 
-    clusters_no = compute_clusters_kshape(subsequences)
-    kshape = KShape(n_clusters=clusters_no, random_state=42)
-    kshape.fit(subsequences)
-    return kshape
+    if use_minibatch:
+        kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
+    else:
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
+
+    kmeans.fit(subsequences)
+    return kmeans
+
+
 
 def get_labelled_windows(x, horizon=1):
     return x[:, :-horizon], x[:, -horizon:]
