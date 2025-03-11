@@ -6,13 +6,7 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import mean_squared_error, r2_score, silhouette_score
-from tslearn.clustering import KShape, TimeSeriesKMeans
 
-MODELS = ["conv", "conv-lstm", "lstm" ,"mlp", "ar"]
-
-
-def get_models_list() :
-    return MODELS
 
 def evaluate_preds(y_true, y_pred, scaler):
     # Ensure y_pred is a NumPy array in case it's a list of predictions

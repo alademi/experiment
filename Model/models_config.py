@@ -6,16 +6,13 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 
-# -----------------------------------------------------------------------------
-# Hyperparameters and Configuration
-# -----------------------------------------------------------------------------
+
 WINDOW_SIZE = 10      # Number of timesteps per input window
 HORIZON = 1           # Forecast horizon
 LR = 0.001            # Learning rate for torch models
 EPOCHS = 10           # Number of training epochs
 BATCH_SIZE = 32       # Batch size for torch models
 
-# Update the models list to include the new PyTorch implementations.
 MODELS = [
     "conv", "mlp", "lstm", "cnn-lstm", "trmf", "lstnet-skip",
     "darnn", "deepglo", "tft", "deepar", "deepstate", "ar",
@@ -23,22 +20,14 @@ MODELS = [
     "mq-cnn", "deepfactor"
 ]
 
-# -----------------------------------------------------------------------------
-# Loss Functions
-# -----------------------------------------------------------------------------
+
 def gaussian_nll_loss(mean, sigma, target):
-    """
-    Negative log-likelihood for a Gaussian distribution.
-    """
     eps = 1e-9
     sigma = torch.clamp(sigma, min=eps)
     loss = 0.5 * torch.log(sigma ** 2 + eps) + 0.5 * ((target - mean) ** 2 / (sigma ** 2 + eps))
     return loss.mean()
 
 def trmf_loss(model, x_batch, y_batch, lambda_f=0.01, lambda_g=0.01, lambda_a=0.01):
-    """
-    TRMF loss: MSE reconstruction plus L2 regularization on latent factors.
-    """
     y_pred = model(x_batch)
     if y_pred.dim() == 2 and y_pred.size(-1) > 1:
         mse = F.mse_loss(y_pred, y_batch)
@@ -49,10 +38,6 @@ def trmf_loss(model, x_batch, y_batch, lambda_f=0.01, lambda_g=0.01, lambda_a=0.
     reg_a = torch.sum(model.A ** 2)
     return mse + lambda_f * reg_f + lambda_g * reg_g + lambda_a * reg_a
 
-# -----------------------------------------------------------------------------
-# PyTorch Model Definitions
-# -----------------------------------------------------------------------------
-# 1. CNN Model
 class ConvModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, kernel_size=3, channels=32):
         super(ConvModel, self).__init__()
@@ -67,13 +52,11 @@ class ConvModel(nn.Module):
             nn.Linear(64, horizon)
         )
     def forward(self, x):
-        # x: (batch, n_timesteps, 1)
-        x = x.permute(0, 2, 1)  # -> (batch, 1, n_timesteps)
+        x = x.permute(0, 2, 1)
         x = self.relu(self.conv(x))
         x = x.flatten(start_dim=1)
         return self.fc(x)
 
-# 2. MLP Model
 class MLPModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1):
         super(MLPModel, self).__init__()
@@ -87,11 +70,9 @@ class MLPModel(nn.Module):
             nn.Linear(64, horizon)
         )
     def forward(self, x):
-        # x: (batch, n_timesteps, 1) -> flatten to (batch, n_timesteps)
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
-# 3. LSTM Model
 class LSTMModel(nn.Module):
     def __init__(self, n_timesteps, hidden_size=100, horizon=1):
         super(LSTMModel, self).__init__()
@@ -100,11 +81,10 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(hidden_size, horizon)
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
-        x = lstm_out[:, -1, :]  # Last timestep
+        x = lstm_out[:, -1, :]
         x = self.relu(x)
         return self.fc(x)
 
-# 4. CNN-LSTM Model
 class ConvLSTMModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, conv_channels=32, lstm_hidden=50, kernel_size=3):
         super(ConvLSTMModel, self).__init__()
@@ -113,23 +93,22 @@ class ConvLSTMModel(nn.Module):
         self.lstm = nn.LSTM(input_size=conv_channels, hidden_size=lstm_hidden, batch_first=True)
         self.fc = nn.Linear(lstm_hidden, horizon)
     def forward(self, x):
-        x = x.permute(0, 2, 1)  # (batch, 1, n_timesteps)
+        x = x.permute(0, 2, 1)
         x = self.relu(self.conv(x))
-        x = x.permute(0, 2, 1)  # (batch, new_length, conv_channels)
+        x = x.permute(0, 2, 1)
         lstm_out, _ = self.lstm(x)
         x = lstm_out[:, -1, :]
         return self.fc(x)
 
-# 5. TRMF Model
 class TRMFModel(nn.Module):
     def __init__(self, n_timesteps, rank=5, horizon=1):
         super(TRMFModel, self).__init__()
         self.n_timesteps = n_timesteps
         self.rank = rank
         self.horizon = horizon
-        self.F = nn.Parameter(torch.randn(n_timesteps, rank))  # latent factors
-        self.G = nn.Parameter(torch.randn(rank, 1))            # factor loadings
-        self.A = nn.Parameter(torch.eye(rank))                 # transition matrix
+        self.F = nn.Parameter(torch.randn(n_timesteps, rank))
+        self.G = nn.Parameter(torch.randn(rank, 1))
+        self.A = nn.Parameter(torch.eye(rank))
         self.bias = nn.Parameter(torch.zeros(1))
         self.x_linear = nn.Linear(1, 1)
         self.fc_horizon = nn.Linear(1, horizon)
@@ -142,7 +121,6 @@ class TRMFModel(nn.Module):
         combined = latent_pred.unsqueeze(0) + x_component
         return self.fc_horizon(combined)
 
-# 6. LSTNet-Skip Model
 class LSTNetSkipModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, kernel_size=3, conv_channels=50,
                  rnn_hidden_size=100, skip=2, skip_rnn_hidden_size=50, highway_window=3,
@@ -200,7 +178,6 @@ class LSTNetSkipModel(nn.Module):
             res = res + hw_out
         return res
 
-# 7. DARNN Model
 class DARNNModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, encoder_hidden_size=64, decoder_hidden_size=64, attention_dim=32):
         super(DARNNModel, self).__init__()
@@ -265,7 +242,6 @@ class DARNNModel(nn.Module):
         outputs = torch.cat(outputs, dim=1)
         return outputs
 
-# 8. DeepGlo Model
 class DeepGloModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, global_hidden_size=64, local_hidden_size=32, local_window=3, dropout=0.2):
         super(DeepGloModel, self).__init__()
@@ -294,7 +270,6 @@ class DeepGloModel(nn.Module):
         fused = self.dropout(fused)
         return fused
 
-# 9. Gated Residual Network (for TFT)
 class GatedResidualNetwork(nn.Module):
     def __init__(self, d_model, dropout=0.1):
         super(GatedResidualNetwork, self).__init__()
@@ -312,7 +287,6 @@ class GatedResidualNetwork(nn.Module):
         gating = torch.sigmoid(self.gate(residual))
         return residual + x * gating
 
-# 10. Positional Encoding (for TFT)
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -329,7 +303,6 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :seq_len, :]
         return self.dropout(x)
 
-# 11. TFT Model
 class TFTModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
         super(TFTModel, self).__init__()
@@ -346,12 +319,11 @@ class TFTModel(nn.Module):
         x = self.input_projection(x)
         x = self.grn(x)
         x = self.positional_encoding(x)
-        x = x.permute(1, 0, 2)  # (n_timesteps, batch, d_model)
+        x = x.permute(1, 0, 2)
         x = self.transformer_encoder(x)
         x = x[-1]
         return self.fc_out(x)
 
-# 12. DeepAR Model
 class DeepARModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, hidden_size=64, num_layers=1, dropout=0.1):
         super(DeepARModel, self).__init__()
@@ -362,7 +334,7 @@ class DeepARModel(nn.Module):
         self.lstm = nn.LSTM(input_size=1, hidden_size=hidden_size, num_layers=num_layers,
                             batch_first=True, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
-        self.fc_out = nn.Linear(hidden_size, 2)  # (mean, log_sigma)
+        self.fc_out = nn.Linear(hidden_size, 2)  # outputs mean and log_sigma
     def forward(self, x):
         batch_size = x.size(0)
         out, (h, c) = self.lstm(x)
@@ -382,7 +354,6 @@ class DeepARModel(nn.Module):
         sigmas = torch.cat(sigmas, dim=1)
         return means, sigmas
 
-# 13. DeepState Model
 class DeepStateModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1, hidden_size=64, num_layers=1, dropout=0.1):
         super(DeepStateModel, self).__init__()
@@ -422,7 +393,6 @@ class DeepStateModel(nn.Module):
                 last_input = y_t
             return torch.cat(outputs, dim=1)
 
-# 14. AR Model
 class ARModel(nn.Module):
     def __init__(self, n_timesteps, horizon=1):
         super(ARModel, self).__init__()
@@ -431,7 +401,6 @@ class ARModel(nn.Module):
         self.coeffs = nn.Parameter(torch.randn(n_timesteps))
         self.bias = nn.Parameter(torch.zeros(1))
     def forward(self, x):
-        # x: (batch, n_timesteps, 1) -> (batch, n_timesteps)
         x = x.squeeze(-1)
         if self.horizon == 1:
             return (x * self.coeffs).sum(dim=1, keepdim=True) + self.bias
@@ -444,25 +413,20 @@ class ARModel(nn.Module):
                 window = torch.cat([window[:, 1:], yhat], dim=1)
             return torch.cat(forecasts, dim=1)
 
-# -----------------------------------------------------------------------------
-# New PyTorch Implementations for GluonTS-style Models
-# -----------------------------------------------------------------------------
-class GluonTS_MQCNN(nn.Module):
-    def __init__(self, n_timesteps, horizon=1, num_quantiles=3, channels=32, kernel_size=3, dropout=0.1):
+
+class GluonTS_MQCNN_Single(nn.Module):
+    def __init__(self, n_timesteps, horizon=1, channels=32, kernel_size=3, dropout=0.1):
         """
-        GluonTS-style MQ-CNN model in PyTorch.
-        Uses two convolution layers (with padding) followed by dropout and a dense layer
-        to produce forecasts for multiple quantiles.
+        Modified GluonTS-style MQ-CNN model that outputs a single point forecast.
         """
-        super(GluonTS_MQCNN, self).__init__()
+        super(GluonTS_MQCNN_Single, self).__init__()
         self.n_timesteps = n_timesteps
         self.horizon = horizon
-        self.num_quantiles = num_quantiles
-        padding = kernel_size // 2  # Preserve sequence length
+        padding = kernel_size // 2  # preserve sequence length
         self.conv1 = nn.Conv1d(in_channels=1, out_channels=channels, kernel_size=kernel_size, padding=padding)
         self.conv2 = nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=kernel_size, padding=padding)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(channels * n_timesteps, horizon * num_quantiles)
+        self.fc = nn.Linear(channels * n_timesteps, horizon)
     def forward(self, x):
         # x: (batch, n_timesteps, 1)
         x = x.permute(0, 2, 1)  # -> (batch, 1, n_timesteps)
@@ -470,17 +434,11 @@ class GluonTS_MQCNN(nn.Module):
         x = F.relu(self.conv2(x))
         x = self.dropout(x)
         x = x.flatten(start_dim=1)
-        out = self.fc(x)
-        out = out.view(-1, self.horizon, self.num_quantiles)
+        out = self.fc(x)  # (batch, horizon)
         return out
 
 class GluonTS_DeepFactor(nn.Module):
     def __init__(self, n_timesteps, horizon=1, num_factors=5, rnn_hidden=64, fc_hidden=32):
-        """
-        GluonTS-style DeepFactor model in PyTorch.
-        Combines learnable global factors with a local GRU to produce dynamic mixing weights.
-        Each global factor is passed through a small forecast network.
-        """
         super(GluonTS_DeepFactor, self).__init__()
         self.n_timesteps = n_timesteps
         self.horizon = horizon
@@ -494,33 +452,28 @@ class GluonTS_DeepFactor(nn.Module):
         )
         self.global_factors = nn.Parameter(torch.randn(num_factors, n_timesteps))
     def forward(self, x):
-        # x: (batch, n_timesteps, 1)
         batch_size = x.size(0)
-        _, h = self.rnn(x)  # h: (1, batch, rnn_hidden)
-        h = h.squeeze(0)    # -> (batch, rnn_hidden)
-        mixing = self.fc_mixing(h)  # (batch, num_factors * horizon)
-        mixing = mixing.view(batch_size, self.horizon, self.num_factors)  # (batch, horizon, num_factors)
+        _, h = self.rnn(x)
+        h = h.squeeze(0)
+        mixing = self.fc_mixing(h)
+        mixing = mixing.view(batch_size, self.horizon, self.num_factors)
         factor_forecasts = []
         for i in range(self.num_factors):
-            # Process the global factor vector through the forecast network.
-            factor_i = self.global_factors[i].unsqueeze(0)  # (1, n_timesteps)
-            forecast_i = self.factor_forecast(factor_i)       # (1, horizon)
+            factor_i = self.global_factors[i].unsqueeze(0)
+            forecast_i = self.factor_forecast(factor_i)
             factor_forecasts.append(forecast_i)
-        factor_forecasts = torch.cat(factor_forecasts, dim=0)  # (num_factors, horizon)
-        factor_forecasts = factor_forecasts.transpose(0, 1)      # (horizon, num_factors)
+        factor_forecasts = torch.cat(factor_forecasts, dim=0)
+        factor_forecasts = factor_forecasts.transpose(0, 1)
         forecasts = []
         for t in range(self.horizon):
-            # Combine mixing weights with factor forecasts for each time step.
             f_t = (mixing[:, t, :] * factor_forecasts[t]).sum(dim=1, keepdim=True)
             forecasts.append(f_t)
-        forecasts = torch.cat(forecasts, dim=1)  # (batch, horizon)
+        forecasts = torch.cat(forecasts, dim=1)
         return forecasts
 
-# -----------------------------------------------------------------------------
-# Model Builder
-# -----------------------------------------------------------------------------
+
 class ModelBuilder:
-    def __init__(self, model_type="lstm", n_timesteps=10, horizon=1, rank=5,
+    def __init__(self, model_type="lstm", n_timesteps=WINDOW_SIZE, horizon=HORIZON, rank=5,
                  rf_n_estimators=100, rf_max_depth=None,
                  decision_tree_max_depth=None, xgb_max_depth=None):
         self.model_type = model_type
@@ -550,10 +503,9 @@ class ModelBuilder:
             "random_forest": lambda: RandomForestRegressor(n_estimators=self.rf_n_estimators,
                                                            max_depth=self.rf_max_depth),
             "xgboost": lambda: XGBRegressor(max_depth=self.xgb_max_depth),
-            "mq-cnn": lambda: GluonTS_MQCNN(self.n_timesteps, horizon=self.horizon),
+            "mq-cnn": lambda: GluonTS_MQCNN_Single(self.n_timesteps, horizon=self.horizon),
             "deepfactor": lambda: GluonTS_DeepFactor(self.n_timesteps, horizon=self.horizon)
         }
-
         try:
             return model_factories[self.model_type]()
         except KeyError:

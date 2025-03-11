@@ -60,7 +60,7 @@ def plot_clusters(subsequences_norm, labels, cluster_no, window_size, file_name)
 
     # Save the plot as an image file
     plt.tight_layout()
-    save_path = f"results/clustering_plots/cluster_plots/{file_name}_clusters.png"
+    save_path = f"results/plots/cluster_plots2/{file_name}_clusters.png"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)  # Create directory if it doesn't exist
     plt.savefig(save_path)
     plt.close()  # Free memory

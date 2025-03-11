@@ -39,10 +39,6 @@ if torch.cuda.is_available():
 
 
 def reset_pytorch_configuration():
-    """
-    Reset PyTorch configuration by clearing CUDA cache and re-setting random seeds.
-    This helps avoid interference from previous runs when processing multiple datasets.
-    """
     # Clear CUDA cache if available
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
