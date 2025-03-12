@@ -238,7 +238,7 @@ def cluster_data(train):
     return clusters, clustering_result.n_clusters, clustering_result.cluster_centers_
 
 
-def prepare_data(data_path):
+def evaluate_experiment(data_path):
     file_names = os.listdir(data_path)
     for name in file_names:
         if name.lower().endswith('.csv'):
@@ -268,4 +268,4 @@ def prepare_data(data_path):
 
 if __name__ == "__main__":
     test_files_path = "test"  # Adjust the path as needed.
-    prepare_data(test_files_path)
+    evaluate_experiment(test_files_path)
