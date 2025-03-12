@@ -203,7 +203,6 @@ def save_rmse_by_cluster(predictions_by_cluster, dataset_name):
     global_rmse = {"Cluster": "Global"}
     global_rmse.update(global_row)
 
-    # Use pd.concat instead of .append
     cluster_rmse_df = pd.concat([cluster_rmse_df, pd.DataFrame([global_rmse])], ignore_index=True)
 
     rmse_file = f"/Model/first_experiment/results/evaluation/clusters/{dataset_name}_rmse.csv"
@@ -212,9 +211,6 @@ def save_rmse_by_cluster(predictions_by_cluster, dataset_name):
     print(f"RMSE per cluster and global saved to {rmse_file}")
 
 
-#############################################
-# 4. Cluster Data and Prepare Test Windows
-#############################################
 def cluster_data(train):
     """
     Cluster the training windows and split them into training and validation subsets.
